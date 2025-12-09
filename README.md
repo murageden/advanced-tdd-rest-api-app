@@ -22,4 +22,4 @@ First, make sure that the app is running on localhost. Run tests with the comman
 python -m unittest tests.test_rest_api_app
 ```
 
-![Tests](https://github.com/murageden/simple-tdd-calculator-app/blob/main/Screenshot%202025-12-05%20074727.png?raw=true "Tests")
+![Tests](https://github.com/murageden/advanced-tdd-rest-api-app/blob/main/Screenshot%202025-12-09%20132236.png?raw=true "Tests")
