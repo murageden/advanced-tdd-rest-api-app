@@ -1,8 +1,31 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+import uuid
+from http.client import HTTPException
+from typing import List
+from fastapi import FastAPI, Depends, Response, status
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import Column, Integer, String, DateTime
 from datetime import datetime
-from contextlib import asynccontextmanager
 
+from sqlalchemy.orm import Session
+from sqlalchemy.ext.declarative import declarative_base
+from .database import get_db
+from .hash_pass import hash, verify
+
+
+Base = declarative_base()
+
+class UserDB(Base):
+    __tablename__ = "users"
+    id = Column(String, primary_key=True)
+    name = Column(String)
+    email = Column(String)
+    phone = Column(String)
+    password = Column(String)
+    username = Column(String)
+    location = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    login_at = Column(DateTime)
 
 class User(BaseModel):
     name: str
@@ -11,117 +34,144 @@ class User(BaseModel):
     username: str
     location: str
     password: str
+    model_config = {"from_attributes": True}
+
+class UserDBTransformer(User):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    login_at: datetime
+
+class RegisterUser(BaseModel):
+    registered_user: UserDBTransformer | None
+    msg: str
+    status_code: int
+
+class UserList(BaseModel):
+    users: List[UserDBTransformer]
+
+class ViewUser(BaseModel):
+    viewed_user: UserDBTransformer | None
+    msg: str
+    status_code: int
+
+class UpdateUser(BaseModel):
+    updated_user: UserDBTransformer | None
+    msg: str
+    status_code: int
 
 class Login(BaseModel):
     username: str
     password: str
 
-storage = {}
+class LoginUser(BaseModel):
+    logged_in_user: UserDBTransformer | None
+    msg: str
+    status_code: int
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    storage["current_id"] = 1
-    storage["users"] = []
-    yield
-    # storage.clear()
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 @app.get("/")
 async def status_page():
-    response = {
+    rsp = {
         "msg": "Welcome! This shows that the API is up and running fine",
         "status_code": 200
     }
-    return response
+    return rsp
 
 
-@app.post("/register")
-async def register(user: User):
+@app.post("/register", response_model=RegisterUser, status_code=201)
+async def register(response:Response, user: User, db: Session = Depends(get_db)):
+    user_exists = db.query(UserDB).filter(
+        UserDB.username == user.username).first() or db.query(
+        UserDB).filter(UserDB.email == user.email).first()
+    if user_exists:
+        response.status_code = status.HTTP_409_CONFLICT
+        rsp = RegisterUser(registered_user=None,
+                           msg="User already exists",
+                           status_code=409)
+        return rsp
+    new_id = str(uuid.uuid4())
     current_time = datetime.now()
-    registered_user = {
-        "id": storage["current_id"],
-        "name": user.name,
-        "email": user.email,
-        "phone": user.phone,
-        "username": user.username,
-        "location": user.location,
-        "password": user.password,
-        "created_at": current_time,
-        "last_modified_at": current_time
-    }
-    storage["users"].append(registered_user)
-    storage["current_id"] += 1
-    response = {
-        "msg": "User created successfully",
-        "status_code": 201,
-        "registered_user": registered_user
-    }
-    return response
+    hashed_password = hash(user.password)
+    registered_user = UserDB(id=new_id, name=user.name,
+                email=user.email,
+                phone=user.phone, username=user.username,
+                location=user.location, password=hashed_password,
+                created_at=current_time, updated_at=current_time,
+                login_at=current_time)
+    db.add(registered_user)
+    db.commit()
+    db.refresh(registered_user)
+    rsp = RegisterUser(registered_user=registered_user,
+                            msg="User created successfully",
+                            status_code=201)
+    return rsp
 
 
-@app.get("/view/{user_id}")
-async def view_user(user_id: int):
-    users = storage["users"]
-    users_filter = list(filter(lambda x: x.get("id") == user_id, users))
-    current_user = users_filter[0]
-    response = {
-        "msg": "User details returned successfully",
-        "status_code": 200,
-        "user": current_user
-    }
-    return response
+@app.get("/view/{user_id}", response_model=ViewUser, status_code=200)
+async def view_user(response: Response, user_id: str, db: Session = Depends(get_db)):
+    users = db.query(UserDB)
+    user = users.filter(UserDB.id == user_id).first()
+    if not user:
+        response.status_code = status.HTTP_404_NOT_FOUND
+        rsp = ViewUser(viewed_user=None,
+                       msg="User does not exist",
+                        status_code=404)
+        return rsp
+    else:
+        response.status_code = status.HTTP_200_OK
+        rsp = ViewUser(viewed_user=user,
+                        msg="User details returned successfully",
+                        status_code=200)
+        return rsp
 
-@app.put("/update/{user_id}")
-async def update_user_details(user: User,user_id: int):
-    users = storage["users"]
-    users_filter = list(filter(lambda x: x.get("id") == user_id, users))
-    current_user = users_filter[0]
-    idx = users.index(current_user)
+@app.put("/update/{user_id}", response_model=UpdateUser, status_code=200)
+async def update_user_details(response: Response, user: User,user_id: str, db: Session = Depends(get_db)):
+    users = db.query(UserDB)
+    user_in_db = users.filter(UserDB.id == user_id).first()
+    if not user_in_db:
+        response.status_code = status.HTTP_404_NOT_FOUND
+        rsp = UpdateUser(updated_user=None,
+                         msg="User does not exist",
+                           status_code=404)
+        return rsp
     current_time = datetime.now()
-    updated_user = {
-        "id": current_user.get("id"),
-        "name": user.name,
-        "email": user.email,
-        "phone": user.phone,
-        "username": user.username,
-        "location": user.location,
-        "password": user.password,
-        "created_at": current_user.get("created_at"),
-        "last_modified_at": current_time
-    }
-    storage["users"][idx] = updated_user
-    response = {
-        "msg": "User details updated successfully",
-        "status_code": 200,
-        "updated_user": updated_user
-    }
-    return response
+    for k,v in user:
+        setattr(user_in_db, k, v)
+    if(user.password):
+        hashed_password = hash(user.password)
+        user_in_db.password = hashed_password
+    user_in_db.updated_at = current_time
+    db.commit()
+    db.refresh(user_in_db)
+    rsp = UpdateUser(updated_user=user_in_db,
+                           msg="User details updated successfully",
+                           status_code=200)
+    return rsp
 
-@app.post("/login")
-async def login_user(login: Login):
-    users = storage["users"]
-    users_filter = list(filter(lambda x: x.get("username") == login.username and x.get("password") == login.password, users))
-    current_user = users_filter[0]
-    idx = users.index(current_user)
+@app.post("/login", response_model=LoginUser, status_code=200)
+async def login_user(response: Response, login: Login, db: Session = Depends(get_db)):
+    users = db.query(UserDB)
+    user = users.filter(
+        UserDB.username == login.username and verify(login.password, UserDB.password)).first()
+    if not user:
+        response.status_code = status.HTTP_404_NOT_FOUND
+        rsp = LoginUser(logged_in_user=None,
+                             msg="User does not exist",
+                             status_code=404)
+        return rsp
     current_time = datetime.now()
-    logged_in_user = {
-        "id": current_user.get("id"),
-        "name": current_user.get("name"),
-        "email": current_user.get("email"),
-        "phone": current_user.get("phone"),
-        "username": current_user.get("username"),
-        "location": current_user.get("location"),
-        "password": current_user.get("password"),
-        "created_at": current_user.get("created_at"),
-        "last_modified_at": current_user.get("last_modified_at"),
-        "last_logged_in_at": current_time
-    }
-    storage["users"][idx] = logged_in_user
-    response = {
-        "msg": "User logged in successfully",
-        "status_code": 200,
-        "logged_in_user": logged_in_user
-    }
-    return response
+    if (verify(login.password, user.password)):
+        user.login_at = current_time
+        rsp = LoginUser(logged_in_user=user,
+                               msg="User logged in successfully",
+                               status_code=200)
+        return rsp
+    else:
+        response.status_code = status.HTTP_403_FORBIDDEN
+        rsp = LoginUser(logged_in_user=None,
+                    msg="Please check your login details",
+                    status_code=403)
+        return rsp
